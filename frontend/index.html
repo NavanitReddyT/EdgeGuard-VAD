@@ -1,1 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Anomaly Detection</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { background-color: #0f0f0f; color: #f0f0f0; font-family: 'Fira Code', monospace; }
+        #root { display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        .main-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; width: 100%; max-width: 1400px; }
+        .video-container, .controls-container, .chart-container { background-color: #1a1a1a; padding: 20px; border-radius: 8px; }
+        .video-feed { width: 100%; border-radius: 4px; }
+        .anomaly-banner { background-color: #ff3333; color: white; text-align: center; padding: 10px; border-radius: 4px; margin-bottom: 20px; font-weight: bold; }
+        .metrics-panel { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; text-align: center; margin: 20px 0; }
+        .metric-card h3 { margin: 0; font-size: 1.5em; color: #00ff88; transition: color 0.3s; }
+        .metric-card p { margin: 5px 0 0; color: #aaa; }
+        .controls-container button { background-color: #333; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; margin: 5px; }
+        .controls-container button:hover { background-color: #444; }
+        .status-indicator { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 10px; }
+        .status-indicator.connected { background-color: #00ff88; }
+        .status-indicator.disconnected { background-color: #ff3333; }
+        .chart-container { grid-column: 1 / -1; }
+        @media (max-width: 900px) { .main-grid { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
 
+    <script type="text/babel">
+        const API_URL = 'http://localhost:8000';
+
+        function App() {
+            const [metrics, setMetrics] = React.useState({ fps: 0, cpu: 0, ram: 0, score: 0, anomaly: false, frame_count: 0 });
+            const [running, setRunning] = React.useState(false);
+            const [mode, setMode] = React.useState('webcam');
+            const [threshold, setThreshold] = React.useState(0.5);
+            const [scores, setScores] = React.useState([]);
+            const [wsConnected, setWsConnected] = React.useState(false);
+
+            React.useEffect(() => {
+                const connect = () => {
+                    const ws = new WebSocket(`ws://localhost:8000/ws`);
+                    ws.onopen = () => setWsConnected(true);
+                    ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        setMetrics(data);
+                        setScores(prev => [...prev.slice(-99), data.score]);
+                    };
+                    ws.onclose = () => {
+                        setWsConnected(false);
+                        setTimeout(connect, 3000);
+                    };
+                    ws.onerror = () => ws.close();
+                };
+                connect();
+            }, []);
+
+            const handleControl = async (endpoint, body) => {
+                try {
+                    const response = await fetch(`${API_URL}${endpoint}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: body ? JSON.stringify(body) : null,
+                    });
+                    const data = await response.json();
+                    if (endpoint === '/start') setRunning(true);
+                    if (endpoint === '/stop') setRunning(false);
+                    if (endpoint === '/mode') setMode(data.mode);
+                } catch (error) {
+                    console.error(`Error with ${endpoint}:`, error);
+                }
+            };
+
+            const handleThresholdChange = (e) => {
+                const value = parseFloat(e.target.value);
+                setThreshold(value);
+                // Debounce
+                setTimeout(() => handleControl('/threshold', { value }), 300);
+            };
+
+            const downloadReport = async () => {
+                const response = await fetch(`${API_URL}/report`);
+                const data = await response.json();
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'session_report.json';
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            return (
+                <React.Fragment>
+                    {metrics.anomaly && <AlertBanner />}
+                    <div className="main-grid">
+                        <VideoFeed url={`${API_URL}/video`} />
+                        <div className="controls-container">
+                            <div>
+                                <span className={`status-indicator ${wsConnected ? 'connected' : 'disconnected'}`}></span>
+                                Status: {running ? 'Running' : 'Off'}
+                            </div>
+                            <div>Mode: {mode}</div>
+                            <hr />
+                            <MetricsPanel metrics={metrics} />
+                            <hr />
+                            <div>
+                                <label>Threshold: {threshold.toFixed(2)}</label>
+                                <input type="range" min="0" max="1" step="0.01" value={threshold} onChange={handleThresholdChange} />
+                            </div>
+                            <hr />
+                            <Controls 
+                                onStart={() => handleControl('/start')}
+                                onStop={() => handleControl('/stop')}
+                                onMode={(newMode) => handleControl('/mode', { mode: newMode })}
+                                onDownloadReport={downloadReport}
+                            />
+                        </div>
+                        <div className="chart-container">
+                            <ScoreChart scores={scores} threshold={threshold} />
+                        </div>
+                    </div>
+                </React.Fragment>
+            );
+        }
+
+        const AlertBanner = () => <div className="anomaly-banner">&#128680; ANOMALY DETECTED</div>;
+
+        const VideoFeed = ({ url }) => <div className="video-container"><img src={url} className="video-feed" alt="Live video feed" /></div>;
+
+        const MetricsPanel = ({ metrics }) => (
+            <div className="metrics-panel">
+                <div className="metric-card"><h3>{metrics.fps.toFixed(0)}</h3><p>FPS</p></div>
+                <div className="metric-card"><h3>{metrics.cpu.toFixed(1)}%</h3><p>CPU</p></div>
+                <div className="metric-card"><h3>{metrics.ram.toFixed(0)}MB</h3><p>RAM</p></div>
+                <div className="metric-card"><h3 style={{ color: metrics.anomaly ? '#ff3333' : '#00ff88' }}>{metrics.score.toFixed(2)}</h3><p>Score</p></div>
+            </div>
+        );
+
+        const Controls = ({ onStart, onStop, onMode, onDownloadReport }) => (
+            <div>
+                <button onClick={onStart}>&#9654; Start</button>
+                <button onClick={onStop}>&#9632; Stop</button>
+                <button onClick={() => onMode('dataset')}>Dataset</button>
+                <button onClick={() => onMode('webcam')}>Webcam</button>
+                <button onClick={onDownloadReport}>&#11015; Download Report</button>
+            </div>
+        );
+
+        const ScoreChart = ({ scores, threshold }) => {
+            const chartRef = React.useRef(null);
+            const chartInstance = React.useRef(null);
+
+            React.useEffect(() => {
+                if (chartRef.current) {
+                    chartInstance.current = new Chart(chartRef.current, {
+                        type: 'line',
+                        data: {
+                            labels: Array.from({ length: 100 }, (_, i) => i),
+                            datasets: [
+                                {
+                                    label: 'Anomaly Score',
+                                    data: [],
+                                    borderColor: '#007bff',
+                                    tension: 0.1
+                                },
+                                {
+                                    label: 'Threshold',
+                                    data: [],
+                                    borderColor: '#ff3333',
+                                    borderDash: [5, 5],
+                                    fill: false
+                                }
+                            ]
+                        },
+                        options: {
+                            animation: false,
+                            scales: { y: { min: 0, max: 1 } }
+                        }
+                    });
+                }
+                return () => chartInstance.current?.destroy();
+            }, []);
+
+            React.useEffect(() => {
+                if (chartInstance.current) {
+                    chartInstance.current.data.datasets[0].data = scores;
+                    chartInstance.current.data.datasets[1].data = Array(100).fill(threshold);
+                    chartInstance.current.update('none');
+                }
+            }, [scores, threshold]);
+
+            return <canvas ref={chartRef}></canvas>;
+        };
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
